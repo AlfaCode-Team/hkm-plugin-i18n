@@ -1,0 +1,15 @@
+{
+    "name": "alfacode-team/hkm-plugin-i18n",
+    "description": "HKM Kernel plugin providing 'i18n.translation'.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["hkm-kernel", "plugin", "php", "i18n.translation"],
+    "require": {
+        "php": ">=8.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "Plugins\\I18n\\": ""
+        }
+    }
+}
