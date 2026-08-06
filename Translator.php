@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Plugins\I18n;
 
 /**
- * Minimal file-based translator.
+ * File-based translator over a project-first catalogue cascade.
  *
  * Lang files live at {dir}/{locale}/{group}.php and return a nested array:
  *
@@ -18,17 +18,93 @@ namespace Plugins\I18n;
  *
  * Missing keys fall back to the configured fallback locale, then to the key
  * itself — translation never throws.
+ *
+ * THE CASCADE
+ * -----------
+ * This used to hold a SINGLE directory, which meant the only catalogue that
+ * could ever load was the one this plugin ships. Plugins had nowhere to put
+ * their own messages, so every user-facing string outside that one file was
+ * hard-coded in whatever language it was written in. Worse, APP_LANG_PATH
+ * REPLACED the directory, so a project that pointed it at its own catalogue
+ * silently lost the plugin's.
+ *
+ * Sources are now an ordered list compiled at boot (lang-manifest.php), lowest
+ * priority last: project paths first, plugin paths after. A project therefore
+ * overrides a plugin's wording by default, and can do it without forking.
+ *
+ * GROUPS MERGE — THEY DO NOT SHADOW
+ * ---------------------------------
+ * When several sources define the same group, their arrays are merged with the
+ * higher-priority source winning per key. Taking the first hit wholesale would
+ * mean overriding one key in a forty-key group required copying the other
+ * thirty-nine — and the copy would then silently miss every key the plugin
+ * added later. Merging keeps an override to exactly what it overrides.
+ *
+ * NAMESPACES
+ * ----------
+ * 'user::profile.title' targets the `user` catalogue specifically, so two
+ * plugins can both define 'profile.title' without colliding. A project can
+ * still override a namespaced key by placing {project-lang}/user/{locale}/
+ * profile.php — checked BEFORE the plugin's own directory, mirroring how
+ * namespaced views resolve.
  */
 final class Translator
 {
-    /** @var array<string,array<string,mixed>> loaded [locale => group => data] */
+    /** @var array<string,array<string,mixed>> loaded [locale => cacheKey => data] */
     private array $loaded = [];
 
+    /** @var list<string> Global catalogue roots, highest priority first. */
+    private readonly array $paths;
+
+    /** @var array<string,list<string>> Namespace => roots, highest priority first. */
+    private readonly array $namespaces;
+
+    /**
+     * @param string|list<string>      $directory  One root, or the compiled cascade.
+     * @param array<string,list<string>> $namespaces Namespaced roots from lang-manifest.php.
+     */
     public function __construct(
-        private readonly string $directory,
+        string|array $directory,
         private string $locale = 'en',
         private readonly string $fallback = 'en',
+        array $namespaces = [],
     ) {
+        // A bare string stays valid: most call sites (and every test that only
+        // cares about lookup behaviour) have one directory and no cascade.
+        $this->paths = array_values(array_filter(
+            is_string($directory) ? [$directory] : $directory,
+            static fn(mixed $p): bool => is_string($p) && $p !== '',
+        ));
+
+        $clean = [];
+        foreach ($namespaces as $ns => $dirs) {
+            $dirs = array_values(array_filter(
+                is_string($dirs) ? [$dirs] : (is_array($dirs) ? $dirs : []),
+                static fn(mixed $p): bool => is_string($p) && $p !== '',
+            ));
+            if ($dirs !== []) {
+                $clean[(string) $ns] = $dirs;
+            }
+        }
+        $this->namespaces = $clean;
+    }
+
+    /**
+     * Build a Translator from the boot-compiled cascade.
+     *
+     * @param array{global?:list<string>,namespaces?:array<string,list<string>>} $manifest
+     */
+    public static function fromManifest(
+        array $manifest,
+        string $locale = 'en',
+        string $fallback = 'en',
+    ): self {
+        return new self(
+            $manifest['global'] ?? [],
+            $locale,
+            $fallback,
+            $manifest['namespaces'] ?? [],
+        );
     }
 
     /**
@@ -141,12 +217,21 @@ final class Translator
 
     private function lookup(string $key, string $locale): mixed
     {
+        // 'user::profile.title' → namespace 'user', group 'profile', item 'title'.
+        $namespace = null;
+        if (str_contains($key, '::')) {
+            [$namespace, $key] = explode('::', $key, 2);
+            if ($namespace === '') {
+                $namespace = null;
+            }
+        }
+
         [$group, $item] = array_pad(explode('.', $key, 2), 2, null);
         if ($group === null || $item === null) {
             return null;
         }
 
-        $data = $this->loadGroup($locale, $group);
+        $data = $this->loadGroup($locale, $group, $namespace);
 
         $value = $data;
         foreach (explode('.', $item) as $segment) {
@@ -159,22 +244,75 @@ final class Translator
         return $value;
     }
 
-    /** @return array<string,mixed> */
-    private function loadGroup(string $locale, string $group): array
+    /**
+     * Load and merge a group across the cascade.
+     *
+     * @return array<string,mixed>
+     */
+    private function loadGroup(string $locale, string $group, ?string $namespace = null): array
     {
-        if (isset($this->loaded[$locale][$group])) {
-            return $this->loaded[$locale][$group];
+        $cacheKey = ($namespace ?? '') . '::' . $group;
+
+        if (isset($this->loaded[$locale][$cacheKey])) {
+            return $this->loaded[$locale][$cacheKey];
         }
 
-        // Defend against path traversal in locale/group segments.
-        if (!preg_match('/^[A-Za-z0-9_\-]+$/', $locale) || !preg_match('/^[A-Za-z0-9_\-]+$/', $group)) {
-            return $this->loaded[$locale][$group] = [];
+        // Defend against path traversal in every segment that reaches the path.
+        // The namespace is included: it comes from the key, which may be built
+        // from user input.
+        $safe = '/^[A-Za-z0-9_\-]+$/';
+        if (
+            !preg_match($safe, $locale)
+            || !preg_match($safe, $group)
+            || ($namespace !== null && !preg_match($safe, $namespace))
+        ) {
+            return $this->loaded[$locale][$cacheKey] = [];
         }
 
-        $path = $this->directory . '/' . $locale . '/' . $group . '.php';
-        $data = is_file($path) ? require $path : [];
+        $data = [];
 
-        return $this->loaded[$locale][$group] = is_array($data) ? $data : [];
+        // Reversed so the LOWEST-priority source is applied first and each
+        // higher-priority source overwrites it key by key.
+        foreach (array_reverse($this->rootsFor($namespace)) as $root) {
+            $file = $root . '/' . $locale . '/' . $group . '.php';
+            if (!is_file($file)) {
+                continue;
+            }
+
+            $loaded = require $file;
+            if (is_array($loaded)) {
+                $data = array_replace_recursive($data, $loaded);
+            }
+        }
+
+        return $this->loaded[$locale][$cacheKey] = $data;
+    }
+
+    /**
+     * Catalogue roots to search, highest priority first.
+     *
+     * For a namespaced key the project's `{root}/{namespace}` folders come
+     * first, so a project can override one plugin message while the plugin
+     * stays the canonical source for the rest.
+     *
+     * @return list<string>
+     */
+    private function rootsFor(?string $namespace): array
+    {
+        if ($namespace === null) {
+            return $this->paths;
+        }
+
+        $roots = [];
+        foreach ($this->paths as $path) {
+            $roots[] = $path . '/' . $namespace;
+        }
+
+        foreach ($this->namespaces[$namespace] ?? [] as $path) {
+            $roots[] = $path;
+        }
+
+        return $roots;
     }
 
     /**
