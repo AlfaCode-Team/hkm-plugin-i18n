@@ -1,6 +1,6 @@
 {
     "name": "i18n",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "kernel": "^1.0",
     "solves": "i18n.translation",
     "type": "module",
