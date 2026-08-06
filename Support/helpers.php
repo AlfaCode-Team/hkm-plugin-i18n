@@ -112,3 +112,25 @@ if (!function_exists('lang_has')) {
         return Lang::translator()?->has($key, $locale) ?? false;
     }
 }
+
+if (!function_exists('lang_locale')) {
+    /**
+     * The locale currently active for this request.
+     *
+     * Mainly for templates that must declare the document language:
+     *
+     *   <html lang="<?= esc(lang_locale()) ?>">
+     *
+     * A page whose copy is French but whose lang attribute says "en" is read
+     * aloud with English phonetics by screen readers, and is mis-indexed by
+     * search engines — so the attribute has to follow the copy, not the
+     * template's original language.
+     *
+     * Falls back to $default when no translator is bound (CLI, workers, or a
+     * route that did not load the I18n module) so a template can always render.
+     */
+    function lang_locale(string $default = 'en'): string
+    {
+        return Lang::translator()?->locale() ?? $default;
+    }
+}
