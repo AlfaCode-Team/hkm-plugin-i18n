@@ -102,6 +102,66 @@ final class LocaleStageTest extends TestCase
         ));
     }
 
+    public function test_a_regional_tag_folds_to_its_base_language(): void
+    {
+        // The bug this fixes: a browser configured with ONE regional locale and
+        // no bare fallback sends `fr-CD` alone. Whole-tag comparison matched
+        // nothing in [en, fr, es] and served English to a French reader who had
+        // said, unambiguously, which language they wanted.
+        $this->assertSame('fr', $this->localeSeenDownstream(
+            $this->requestAcceptingLanguage('fr-CD'),
+        ));
+    }
+
+    public function test_the_fold_respects_quality_order(): void
+    {
+        // The highest-q tag is unsupported even after folding, so the next one
+        // is folded rather than the header being abandoned at the first miss.
+        $this->assertSame('fr', $this->localeSeenDownstream(
+            $this->requestAcceptingLanguage('de-DE;q=0.9,fr-CH;q=0.8'),
+        ));
+    }
+
+    public function test_an_exact_match_is_preferred_over_a_fold(): void
+    {
+        // Folding must not flatten a catalogue that genuinely DOES distinguish
+        // regions. With both 'fr-ca' and 'fr' on offer, `fr-CA` has to resolve to
+        // the Canadian catalogue — folding it to 'fr' first would make a regional
+        // catalogue unreachable for the only header that can ask for it.
+        $_ENV['APP_LOCALES'] = 'en,fr,fr-ca';
+
+        $this->assertSame('fr-ca', $this->localeSeenDownstream(
+            $this->requestAcceptingLanguage('fr-CA,fr;q=0.9'),
+        ));
+    }
+
+    public function test_a_regional_tag_still_folds_when_no_regional_catalogue_exists(): void
+    {
+        // The mirror of the case above: same header, but 'fr-ca' is not offered,
+        // so the fold is what stops it falling all the way to English.
+        $_ENV['APP_LOCALES'] = 'en,fr';
+
+        $this->assertSame('fr', $this->localeSeenDownstream(
+            $this->requestAcceptingLanguage('fr-CA'),
+        ));
+    }
+
+    public function test_a_zero_quality_language_is_not_selected(): void
+    {
+        // q=0 means "explicitly not acceptable" — honouring it would serve the
+        // one language the client ruled out.
+        $this->assertSame('en', $this->localeSeenDownstream(
+            $this->requestAcceptingLanguage('fr;q=0,en'),
+        ));
+    }
+
+    public function test_a_wildcard_takes_the_first_supported_language(): void
+    {
+        $this->assertSame('en', $this->localeSeenDownstream(
+            $this->requestAcceptingLanguage('*'),
+        ));
+    }
+
     public function test_an_unsupported_language_falls_back_to_the_default(): void
     {
         $this->assertSame('en', $this->localeSeenDownstream(

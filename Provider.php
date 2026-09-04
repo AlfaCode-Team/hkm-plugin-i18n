@@ -43,7 +43,20 @@ final class Provider implements ModuleContract
 
     public function register(ModuleContainer $container): void
     {
-        $container->bind(Translator::class, static function () {
+        // SINGLETON, not bind(). bind() defaults to $shared = false, so every
+        // make() returned a BRAND NEW Translator — which quietly defeated the
+        // whole point of LocaleStage: it negotiated a locale, set it on the
+        // instance it had just resolved, and bound THAT one to the Lang helpers,
+        // while any service injecting Translator got a fresh instance still
+        // sitting at APP_LOCALE. `__()` and an injected Translator could
+        // therefore answer in two different languages in the same request, and
+        // nothing an app did to the locale could reach the helpers.
+        //
+        // The docblock above always said "a shared Translator"; this is the line
+        // that makes that true. It is per REQUEST, not per worker — the binding
+        // lives in the request-scoped ModuleContainer, which is discarded at
+        // end-of-request, so a mutated locale cannot leak into the next one.
+        $container->singleton(Translator::class, static function () {
             // Boot-compiled cascade: project catalogues first, then every
             // plugin that declared "lang" in its module.json.
             $manifest = ManifestReader::readCompiled('lang-manifest.php', [

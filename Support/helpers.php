@@ -91,6 +91,64 @@ if (!function_exists('trans_choice')) {
     }
 }
 
+if (!function_exists('trans_or')) {
+    /**
+     * Translate a key, falling back to a literal default when it does not
+     * resolve — the safe form for library and plugin code.
+     *
+     * WHY THIS EXISTS
+     * ---------------
+     * trans() returns the KEY when nothing resolves, which is the right answer
+     * for an application: a raw `checkout.title` on screen is an obvious,
+     * findable bug. It is the WRONG answer for a plugin, because a plugin can
+     * legitimately run where no catalogue exists at all — I18n is not a
+     * dependency of any first-party plugin, and translation is unbound on CLI
+     * and worker paths besides. Without a default, "make everything
+     * translatable" would mean a security filter answering a real visitor with
+     * `security-filters::messages.auth.required`.
+     *
+     * So: translate when we can, and otherwise say exactly what the code said
+     * before it was made translatable. Adding a catalogue can then only ever
+     * improve the output, never degrade it — which is what makes it safe to do
+     * this across every plugin at once.
+     *
+     * Usage:
+     *   return Response::forbidden(trans_or(
+     *       'security-filters::messages.shield.forbidden',
+     *       'You do not have the required permissions to access this resource.',
+     *   ));
+     *
+     *   trans_or('cart.items', ':count items', ['count' => 3]);
+     *
+     * @param string                         $key     Dotted, optionally namespaced.
+     * @param string                         $default Returned verbatim (with $replace applied) when the key is missing.
+     * @param array<string,string|int|float> $replace Placeholder => value map.
+     * @param ?string                        $locale  Override the active locale.
+     */
+    function trans_or(string $key, string $default, array $replace = [], ?string $locale = null): string
+    {
+        $translator = Lang::translator();
+
+        if ($translator !== null && $translator->has($key, $locale)) {
+            return $translator->get($key, $replace, $locale);
+        }
+
+        if ($replace === []) {
+            return $default;
+        }
+
+        // Same substitution contract as the Translator — longest key first, one
+        // pass — so a default and its translation interpolate identically.
+        $pairs = [];
+        foreach ($replace as $name => $value) {
+            $pairs[':' . $name] = (string) $value;
+        }
+        uksort($pairs, static fn(string $a, string $b): int => strlen($b) <=> strlen($a));
+
+        return strtr($default, $pairs);
+    }
+}
+
 if (!function_exists('lang_has')) {
     /**
      * Check whether a translation key resolves to a string in the active (or
